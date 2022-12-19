@@ -196,7 +196,7 @@ int main(int argc, char *argv[]) {
   int t = 0;
   for (int i = 0; i < sizes.size(); i++) {
     N = sizes[i];
-    blockSize = 32;
+    blockSize = 64;
     numBlocks = (N + blockSize - 1) / blockSize;
     for (int j = 0; j < numTests; j++) {
       std::cout << "(" << ++t << "/" << total << ")" << " ";
