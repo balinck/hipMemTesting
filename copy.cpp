@@ -3,6 +3,7 @@
 #include <string.h>
 #include <fstream>
 #include <vector>
+#include <algorithm>
 
 #include "hip/hip_runtime.h"
 
@@ -115,8 +116,10 @@ class ManagedMemory : public MemTest {
     void Copy() override {
       hipEventRecord(copyStart);
       if (doPrefetching) {
-        hipMemPrefetchAsync(devX, N*sizeof(float), 0);
-        hipMemPrefetchAsync(devY, N*sizeof(float), 0);
+	int dev;
+	hipGetDevice(&dev);
+        hipMemPrefetchAsync(devX, N*sizeof(float), dev);
+        hipMemPrefetchAsync(devY, N*sizeof(float), dev);
       }
       hipEventRecord(copyStop);
     }
@@ -181,7 +184,19 @@ int main(int argc, char *argv[]) {
 	      << std::endl
     ; 
     exit(-1); 
-  } 
+  }
+ 
+  int dev = 0;
+  char **itr = std::find(argv, argv + argc, "--dev");
+  if (itr != argv + argc && ++itr != argv + argc) {
+   dev = atoi(*itr); 
+  }
+
+  if (hipSetDevice(dev) != hipSuccess) {
+    std::cout << "invalid device specified" << std::endl;
+    exit(-1);
+  }  
+
   int numTests = atoi(argv[1]);
   std::vector<int> sizes = {100000, 1000000, 10000000, 100000000};
   int total = numTests * 4 * sizes.size();
@@ -196,7 +211,7 @@ int main(int argc, char *argv[]) {
   int t = 0;
   for (int i = 0; i < sizes.size(); i++) {
     N = sizes[i];
-    blockSize = 64;
+    blockSize = warpSize;
     numBlocks = (N + blockSize - 1) / blockSize;
     for (int j = 0; j < numTests; j++) {
       std::cout << "(" << ++t << "/" << total << ")" << " ";
