@@ -4,6 +4,7 @@
 #include <fstream>
 #include <vector>
 #include <algorithm>
+#include <chrono>
 
 #include "hip/hip_runtime.h"
 
@@ -25,16 +26,25 @@ void validateResult(int n, float *y) {
   }
 }
 
+void getOpt(char ** begin, char ** end, std::string opt, int* out) {
+  char ** itr = std::find(begin, end, opt);
+
+  if (itr != end && ++itr != end) {
+    *out = atoi(*itr);
+  }
+}
+
 class MemTest {
   protected:
     hipEvent_t initStart, initStop;
     hipEvent_t copyStart, copyStop;
     hipEvent_t execStart, execStop;
-    int blockSize, numBlocks, N;
+    int blockSize, numBlocks;
     float *devX, *devY, *hostX, *hostY;
-    std::string name;
 
   public:
+    std::string name;
+    int N;
     MemTest(int _N, int _blockSize, int _numBlocks, std::string _name) {
       hipEventCreate(&initStart);
       hipEventCreate(&initStop);
@@ -62,7 +72,7 @@ class MemTest {
     }
 
     void Run(std::ofstream *outfile) {
-      std::cout << "Test " << name;
+      std::cout << "Test " << name << " size=" << N;
       Init();
       Copy();
       Exec();
@@ -84,7 +94,7 @@ class MemTest {
       hipDeviceSynchronize();
      
       *outfile << name << "," << N << "," << initMs << "," 
-	       << copyMs << "," << execMs << "," << std::endl
+	       << copyMs << "," << execMs << "," << -1 << "," << std::endl
       ;
     }
 
@@ -94,6 +104,11 @@ class MemTest {
 
     virtual void Init() = 0;
     virtual void Copy() = 0;
+    virtual MemTest* Clone() = 0;
+
+    virtual ~MemTest() {
+
+    }
 };
 
 class ManagedMemory : public MemTest {
@@ -123,6 +138,10 @@ class ManagedMemory : public MemTest {
       }
       hipEventRecord(copyStop);
     }
+
+    ManagedMemory* Clone() override {
+      return new ManagedMemory(*this);
+    }
 };
 
 class ExplicitCopy : public MemTest {
@@ -147,6 +166,10 @@ class ExplicitCopy : public MemTest {
       free(hostX);
       free(hostY);    
     }
+
+    ExplicitCopy* Clone() override {
+      return new ExplicitCopy(*this);
+    }
 };
 
 class PinnedMemory : public MemTest {
@@ -169,6 +192,10 @@ class PinnedMemory : public MemTest {
       hipEventRecord(copyStop);
     }
 
+    PinnedMemory* Clone() override {
+      return new PinnedMemory(*this);
+    }
+
     ~PinnedMemory() {
       hipHostFree(hostX);
       hipHostFree(hostY);  
@@ -187,13 +214,10 @@ int main(int argc, char *argv[]) {
   }
  
   int dev = 0;
-  char **itr = std::find(argv, argv + argc, "--dev");
-  if (itr != argv + argc && ++itr != argv + argc) {
-   dev = atoi(*itr); 
-  }
+  getOpt(argv, argv+argc, "--dev", &dev);
 
   if (hipSetDevice(dev) != hipSuccess) {
-    std::cout << "invalid device specified" << std::endl;
+    std::cout << "invalid deviceId: " << dev << std::endl;
     exit(-1);
   }  
 
@@ -202,42 +226,59 @@ int main(int argc, char *argv[]) {
   int total = numTests * 4 * sizes.size();
 
   outfile << "benchmark," << "size," << "initMs,"
-	  << "copyMs," << "execMs," << std::endl
+	  << "copyMs," << "execMs," << "clock," << std::endl
   ;
 
   int N;
   int blockSize;
   int numBlocks;
-  int t = 0;
+  std::vector<MemTest*> testConfigs;
   for (int i = 0; i < sizes.size(); i++) {
     N = sizes[i];
     blockSize = warpSize;
     numBlocks = (N + blockSize - 1) / blockSize;
+
+    testConfigs.push_back(
+		    new ManagedMemory(N, blockSize, 
+			              numBlocks, "managedMem", 
+				      true)
+    );
+
+    testConfigs.push_back(
+		    new ManagedMemory(N, blockSize, 
+			              numBlocks, "managedMemNoPrefetch",
+				      false)
+    );
+
+    testConfigs.push_back(
+		    new ExplicitCopy(N, blockSize, 
+			             numBlocks, "explicitCopy")
+    );
+
+    testConfigs.push_back(
+		    new PinnedMemory(N, blockSize, 
+			             numBlocks, "pinnedMem")
+    );
+  }
+
+  int t = 0;
+  for (auto testConfig : testConfigs) {
+    using namespace std::chrono;
+    auto start = high_resolution_clock::now();
     for (int j = 0; j < numTests; j++) {
       std::cout << "(" << ++t << "/" << total << ")" << " ";
-      auto test1 = new ManagedMemory(N, blockSize, numBlocks, "managedMem", true);
-      test1->Run(&outfile);
+      auto test = testConfig->Clone();
+      test->Run(&outfile);
       hipDeviceSynchronize();
-      delete test1;
-
-      std::cout << "(" << ++t << "/" << total << ")" << " ";
-      auto test2 = new ManagedMemory(N, blockSize, numBlocks, "managedMemNoPrefetch", false);
-      test2->Run(&outfile);
-      hipDeviceSynchronize();
-      delete test2;
-
-      std::cout << "(" << ++t << "/" << total << ")" << " ";
-      auto test3 = new ExplicitCopy(N, blockSize, numBlocks, "explicitCopy");
-      test3->Run(&outfile);
-      hipDeviceSynchronize();
-      delete test3;
-
-      std::cout << "(" << ++t << "/" << total << ")" << " ";
-      auto test4 = new PinnedMemory(N, blockSize, numBlocks, "pinnedMem");
-      test4->Run(&outfile);
-      hipDeviceSynchronize();
-      delete test4;
+      delete test;
     }
+    auto finish = high_resolution_clock::now();
+    auto dur = duration<double, std::milli>(finish - start);
+    outfile << testConfig->name << "," << testConfig->N << "," 
+	    << -1 << "," << -1 << "," << -1 << ","
+	    << dur.count() << "," << std::endl
+    ;
+    delete testConfig;
   }
   return 0;
 }
